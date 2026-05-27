@@ -45,8 +45,10 @@ class DeployModelserviceStep(Step):
         plan_config = self._load_stack_config(stack_path)
         release = self._require_config(plan_config, "release")
         model_id_label = plan_config.get("model_id_label", "")
-        inference_port = self._require_config(plan_config, "vllmCommon", "inferencePort") # noqa: F841
-        timeout = context.modelservice_deploy_timeout # Generic timeout for all pods in step 9
+
+        timeout = (
+            context.modelservice_deploy_timeout
+        )  # Generic timeout for all pods in step 9
 
         if not context.dry_run:
             pc_error = self._check_priority_class(cmd, plan_config, context)
@@ -120,7 +122,11 @@ class DeployModelserviceStep(Step):
                 # each referenced pool to exist so the route doesn't
                 # linger in ResolvedRefs=False after step 09 returns.
                 self._wait_for_sibling_inference_pools(
-                    cmd, context, errors, plan_config, namespace,
+                    cmd,
+                    context,
+                    errors,
+                    plan_config,
+                    namespace,
                 )
 
         if not errors:
@@ -134,11 +140,17 @@ class DeployModelserviceStep(Step):
             if not decode_wait.success:
                 errors.append(f"Decode pods not ready: {decode_wait.stderr}")
 
-            decode_cfg = plan_config.get("decode", {}) # noqa: F841
-            expected_replicas = int(self._require_config(plan_config, "decode", "replicas"))
+            decode_cfg = plan_config.get("decode", {})  # noqa: F841
+            expected_replicas = int(
+                self._require_config(plan_config, "decode", "replicas")
+            )
             is_multinode = plan_config.get("multinode", {}).get("enabled", False)
             if is_multinode:
-                workers = int(self._require_config(plan_config, "decode", "parallelism", "workers"))
+                workers = int(
+                    self._require_config(
+                        plan_config, "decode", "parallelism", "workers"
+                    )
+                )
                 expected_replicas = expected_replicas * workers
             if expected_replicas > 1 and not context.dry_run:
                 pod_count_result = cmd.kube(
@@ -168,7 +180,9 @@ class DeployModelserviceStep(Step):
                         )
 
             prefill_enabled = self._require_config(plan_config, "prefill", "enabled")
-            prefill_replicas = int(self._require_config(plan_config, "prefill", "replicas"))
+            prefill_replicas = int(
+                self._require_config(plan_config, "prefill", "replicas")
+            )
 
             if prefill_enabled and prefill_replicas > 0:
                 prefill_wait = cmd.wait_for_pods(
@@ -208,7 +222,9 @@ class DeployModelserviceStep(Step):
             if podmonitor_yaml and self._has_yaml_content(podmonitor_yaml):
                 # Check if PodMonitor CRD exists before attempting to apply
                 crd_check = cmd.kube(
-                    "get", "crd", "podmonitors.monitoring.coreos.com",
+                    "get",
+                    "crd",
+                    "podmonitors.monitoring.coreos.com",
                     check=False,
                 )
                 if crd_check.success:
@@ -283,8 +299,7 @@ class DeployModelserviceStep(Step):
                 namespace,
             )
             context.logger.log_info(
-                f"OpenShift route '{route_name}' created to "
-                f"service/{route_service}:80"
+                f"OpenShift route '{route_name}' created to service/{route_service}:80"
             )
 
         # WVA controller + prometheus-adapter are installed up-front by
@@ -295,6 +310,14 @@ class DeployModelserviceStep(Step):
         if wva_config.get("enabled", False) and context.is_openshift:
             self._apply_wva_stack_resources(cmd, stack_path, errors)
             self._log_wva_stack_state(cmd, context, plan_config)
+
+        # Direct HPA: prometheus-adapter was installed by step_03. Here we
+        # apply the per-stack HPA manifest (29_direct-hpa). No platform guard
+        # — Direct HPA works on any cluster with prometheus-adapter.
+        direct_hpa_config = plan_config.get("directHpa", {})
+        if direct_hpa_config.get("enabled", False):
+            self._apply_direct_hpa_stack_resources(cmd, stack_path, errors)
+            self._log_direct_hpa_state(cmd, context, plan_config)
 
         self._propagate_standup_parameters(cmd, context, plan_config)
 
@@ -390,9 +413,13 @@ class DeployModelserviceStep(Step):
             still_missing = []
             for name in missing:
                 check = cmd.kube(
-                    "get", "inferencepool", name,
-                    "--namespace", namespace,
-                    "-o", "name",
+                    "get",
+                    "inferencepool",
+                    name,
+                    "--namespace",
+                    namespace,
+                    "-o",
+                    "name",
                     check=False,
                 )
                 if not check.success:
@@ -495,9 +522,8 @@ class DeployModelserviceStep(Step):
                 break
             # Check securityContext inside extraContainerConfig (used by
             # modelservice Helm chart for container-level security settings)
-            extra_sc = (
-                section.get("extraContainerConfig", {})
-                .get("securityContext", {})
+            extra_sc = section.get("extraContainerConfig", {}).get(
+                "securityContext", {}
             )
             if extra_sc.get("runAsUser") == 0 or extra_sc.get("runAsGroup") == 0:
                 needs_elevated = True
@@ -597,9 +623,8 @@ class DeployModelserviceStep(Step):
         ``oc get``. Best-effort - failures here don't fail step_09.
         """
         wva_cfg = plan_config.get("wva", {}) or {}
-        wva_ns = (
-            wva_cfg.get("namespace")
-            or plan_config.get("namespace", {}).get("name", "")
+        wva_ns = wva_cfg.get("namespace") or plan_config.get("namespace", {}).get(
+            "name", ""
         )
         model_id_label = plan_config.get("model_id_label", "")
         if not (wva_ns and model_id_label):
@@ -612,14 +637,15 @@ class DeployModelserviceStep(Step):
             ("hpa", "HorizontalPodAutoscaler"),
         ):
             result = cmd.kube(
-                "get", kind, resource_name,
-                "--namespace", wva_ns,
+                "get",
+                kind,
+                resource_name,
+                "--namespace",
+                wva_ns,
                 check=False,
             )
             if result.success and result.stdout.strip():
-                context.logger.log_info(
-                    f"📋 {label} state in ns/{wva_ns}:"
-                )
+                context.logger.log_info(f"📋 {label} state in ns/{wva_ns}:")
                 # Indent each line so it visually groups with the
                 # header above it in the standup log.
                 for line in result.stdout.rstrip().splitlines():
@@ -629,6 +655,60 @@ class DeployModelserviceStep(Step):
                     f"Could not query {label}/{resource_name} for state log: "
                     f"{result.stderr.strip()[:200] or '(empty)'}"
                 )
+
+    def _apply_direct_hpa_stack_resources(
+        self,
+        cmd: CommandExecutor,
+        stack_path: Path,
+        errors: list,
+    ) -> None:
+        """Apply this stack's Direct HPA manifest (29_direct-hpa).
+
+        prometheus-adapter was already installed by step_03. Here we only
+        apply the per-stack HPA so the adapter's EPP rules drive THIS
+        model's decode Deployment.
+        """
+        yaml_path = self._find_yaml(stack_path, "29_direct-hpa")
+        if not (yaml_path and self._has_yaml_content(yaml_path)):
+            errors.append(
+                "Direct HPA template (29_direct-hpa) not found or empty -- "
+                "check that directHpa.enabled is set and templates rendered"
+            )
+            return
+        result = cmd.kube("apply", "-f", str(yaml_path))
+        if not result.success:
+            errors.append(f"Failed to apply 29_direct-hpa: {result.stderr}")
+
+    def _log_direct_hpa_state(
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        plan_config: dict,
+    ) -> None:
+        """Log the current state of the Direct HPA after apply. Best-effort."""
+        namespace = plan_config.get("namespace", {}).get("name", "")
+        model_id_label = plan_config.get("model_id_label", "")
+        if not (namespace and model_id_label):
+            return
+
+        hpa_name = f"{model_id_label}-decode-direct"
+        result = cmd.kube(
+            "get",
+            "hpa",
+            hpa_name,
+            "--namespace",
+            namespace,
+            check=False,
+        )
+        if result.success and result.stdout.strip():
+            context.logger.log_info("📋 Direct HPA state:")
+            for line in result.stdout.rstrip().splitlines():
+                context.logger.log_info(f"    {line}")
+        else:
+            context.logger.log_warning(
+                f"Could not query HPA/{hpa_name}: "
+                f"{result.stderr.strip()[:200] or '(empty)'}"
+            )
 
     def _propagate_standup_parameters(
         self, cmd: CommandExecutor, context: ExecutionContext, plan_config: dict
@@ -654,8 +734,12 @@ class DeployModelserviceStep(Step):
 
         if plan_config:
             params["model_name"] = self._require_config(plan_config, "model", "name")
-            params["model_short_name"] = self._require_config(plan_config, "model", "shortName")
-            params["model_huggingface_id"] = plan_config.get("model", {}).get("huggingfaceId", "")
+            params["model_short_name"] = self._require_config(
+                plan_config, "model", "shortName"
+            )
+            params["model_huggingface_id"] = plan_config.get("model", {}).get(
+                "huggingfaceId", ""
+            )
             params["inference_port"] = str(
                 self._require_config(plan_config, "vllmCommon", "inferencePort")
             )

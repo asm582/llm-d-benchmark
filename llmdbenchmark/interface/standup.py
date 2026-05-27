@@ -5,7 +5,9 @@ from llmdbenchmark.interface.commands import Command
 from llmdbenchmark.interface.env import env, env_int
 
 
-def add_subcommands(parser: argparse._SubParsersAction, parents: list[argparse.ArgumentParser] = []):
+def add_subcommands(
+    parser: argparse._SubParsersAction, parents: list[argparse.ArgumentParser] = []
+):
     """Register the ``standup`` subcommand and its arguments."""
     standup_parser = parser.add_parser(
         Command.STANDUP.value,
@@ -71,6 +73,18 @@ def add_subcommands(parser: argparse._SubParsersAction, parents: list[argparse.A
         help="Enable Workload Variant Autoscaler (WVA) for this standup.",
     )
     standup_parser.add_argument(
+        "-d",
+        "--direct-hpa",
+        action="store_true",
+        default=False,
+        dest="direct_hpa",
+        help=(
+            "Enable Direct HPA baseline mode. Scales the decode Deployment "
+            "directly from EPP Prometheus metrics (no WVA controller). "
+            "Mutually exclusive with --wva."
+        ),
+    )
+    standup_parser.add_argument(
         "--monitoring",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -127,10 +141,10 @@ def add_subcommands(parser: argparse._SubParsersAction, parents: list[argparse.A
         type=int,
         default=env_int("LLMDBENCH_PVC_BIND_TIMEOUT"),
         help="Seconds to wait for each PVC (workload, model, extra) to reach "
-             "the Bound phase during standup. A PVC that never binds (e.g. no "
-             "default StorageClass on the cluster) fails fast instead of "
-             "masquerading as a downstream pod/job timeout. Default: 240 "
-             "(some dynamic provisioners take 1-3 minutes per volume).",
+        "the Bound phase during standup. A PVC that never binds (e.g. no "
+        "default StorageClass on the cluster) fails fast instead of "
+        "masquerading as a downstream pod/job timeout. Default: 240 "
+        "(some dynamic provisioners take 1-3 minutes per volume).",
     )
     standup_parser.add_argument(
         "--llmd-repo-path",

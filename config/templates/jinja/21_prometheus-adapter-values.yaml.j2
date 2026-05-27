@@ -2,18 +2,28 @@
    21_prometheus-adapter-values.yaml.j2
 
    Helm values for the prometheus-community/prometheus-adapter chart.
-   Installed alongside WVA to bridge WVA metrics into the Kubernetes
-   external metrics API for HPA consumption.
+   Bridges Prometheus metrics into the Kubernetes external metrics API
+   for HPA consumption. Rendered when wva.enabled OR directHpa.enabled.
 
-   Only rendered when wva.enabled is true.
+   WVA mode:    exposes wva_desired_replicas
+   Direct HPA:  exposes epp_flow_control_queue_size + epp_running_requests
    ============================================================================ #}
-{% if wva is defined and wva.enabled | default(false) %}
+{% set _wva_on = wva is defined and wva.enabled | default(false) %}
+{% set _dhpa_on = directHpa is defined and directHpa.enabled | default(false) %}
+{% if _wva_on or _dhpa_on %}
+{% if _wva_on %}
 prometheus:
   url: {{ wva.prometheus.baseUrl | default('https://thanos-querier.openshift-monitoring.svc.cluster.local') }}
   port: {{ wva.prometheus.port | default(9091) }}
+{% else %}
+prometheus:
+  url: {{ directHpa.prometheus.baseUrl | default('https://thanos-querier.openshift-monitoring.svc.cluster.local') }}
+  port: {{ directHpa.prometheus.port | default(9091) }}
+{% endif %}
 
 rules:
   external:
+{% if _wva_on %}
   - seriesQuery: 'wva_desired_replicas{variant_name!="",exported_namespace!=""}'
     resources:
       overrides:
@@ -23,6 +33,36 @@ rules:
       matches: "^wva_desired_replicas"
       as: "wva_desired_replicas"
     metricsQuery: 'wva_desired_replicas{<<.LabelMatchers>>}'
+{% endif %}
+{% if _dhpa_on %}
+  # EPP flow-control queue size: gateway-api-inference-extension v1.5.x emits
+  # the deprecated inference_extension_* name; newer EPP versions emit
+  # llm_d_router_epp_flow_control_queue_size. Adjust seriesQuery/name if upgrading.
+  - seriesQuery: 'inference_extension_flow_control_queue_size{inference_pool!=""}'
+    resources:
+      namespaced: false
+      overrides:
+        inference_pool: {resource: "deployment"}
+    name:
+      matches: "^inference_extension_flow_control_queue_size"
+      as: "epp_flow_control_queue_size"
+    metricsQuery: >-
+      sum(inference_extension_flow_control_queue_size{<<.LabelMatchers>>})
+      by (inference_pool)
+  # EPP running requests: model_name label contains '/' (e.g. Qwen/Qwen3-32B)
+  # which is not a valid Kubernetes label selector value, so this metric CANNOT
+  # be scoped per namespace/pool in the HPA spec. Exposed here for observability
+  # only; use epp_flow_control_queue_size for HPA scaling decisions.
+  - seriesQuery: 'inference_objective_running_requests{}'
+    resources:
+      overrides:
+        model_name: {resource: "deployment"}
+    name:
+      matches: "^inference_objective_running_requests"
+      as: "epp_running_requests"
+    metricsQuery: >-
+      sum(inference_objective_running_requests{<<.LabelMatchers>>})
+{% endif %}
 
 replicas: 2
 logLevel: 4

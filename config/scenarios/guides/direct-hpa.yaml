@@ -1,0 +1,264 @@
+# DIRECT HPA BASELINE for LLM-D Deployment
+#
+# Same base configuration as `workload-autoscaling.yaml` (Qwen3-32B,
+# 2 decode pods, modelservice deployment) but with Direct HPA instead
+# of WVA. The decode Deployment is scaled directly by a plain Kubernetes
+# HPA driven by EPP Prometheus metrics via prometheus-adapter — no WVA
+# controller in the loop.
+#
+# Use this scenario to establish a WVA baseline: run the same workload
+# under Direct HPA, then compare results to the `workload-autoscaling`
+# scenario to quantify the value of WVA's saturation-aware logic.
+#
+# Metrics used (via prometheus-adapter):
+#   epp_flow_control_queue_size  <- llm_d_router_epp_flow_control_queue_size
+#   epp_running_requests         <- llm_d_router_epp_running_requests
+#
+# See: https://github.com/asm582/inferno-autoscaler/tree/main/hack/benchmark
+#      docs/direct-hpa.md
+#
+# Running:
+#
+#   llmdbenchmark --spec guides/direct-hpa standup -p <namespace>
+#
+# The `-d/--direct-hpa` CLI flag is NOT required because
+# `directHpa.enabled: true` is already set below.
+
+scenario:
+  # ============================================================================
+  # Direct HPA Baseline - Qwen3-32B with 2 decode pods, autoscaled
+  # ============================================================================
+  - name: "inference-scheduling-direct-hpa"
+
+    # =========================================================================
+    # MODEL CONFIGURATION
+    # =========================================================================
+    model:
+      name: Qwen/Qwen3-32B
+      shortName: qwen-qwen3-32b
+      path: models/Qwen/Qwen3-32B
+      huggingfaceId: Qwen/Qwen3-32B
+      size: 1Ti
+      maxModelLen: 16000
+      blockSize: 64
+      gpuMemoryUtilization: 0.95
+
+    # =========================================================================
+    # DEPLOYMENT METHOD
+    # =========================================================================
+    modelservice:
+      enabled: true
+
+    standalone:
+      enabled: false
+
+    # =========================================================================
+    # WVA — explicitly disabled (Direct HPA is mutually exclusive)
+    # =========================================================================
+    wva:
+      enabled: false
+
+    # =========================================================================
+    # DIRECT HPA CONFIGURATION
+    #
+    # Edit any field below to tune scaling behaviour.
+    # Remove a field to fall back to its default (see defaults.yaml).
+    # =========================================================================
+    directHpa:
+      enabled: true
+
+      minReplicas: 1               # never scale below this
+      maxReplicas: 10              # safety ceiling
+
+      # Value at which the HPA triggers a scale-up for the EPP Flow Control
+      # queue-size metric (inference_pool-scoped).
+      queueSizeTarget: 250
+
+      # AverageValue at which the HPA triggers a scale-up for the EPP
+      # running-requests metric (namespace-scoped).
+      runningRequestsTarget: 250
+
+      # Scale behaviour mirrors the inferno-autoscaler reference implementation:
+      #   scaleUp:   react immediately (0 s stabilisation window)
+      #   scaleDown: wait 240 s before removing pods (avoids thrashing)
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 240
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+
+      # Prometheus endpoint for prometheus-adapter.
+      # On OpenShift: thanos-querier (default).
+      # On GKE: point at your kube-prometheus-stack Service URL.
+      prometheus:
+        baseUrl: https://thanos-querier.openshift-monitoring.svc.cluster.local
+        port: 9091
+
+    # =========================================================================
+    # ROUTING / GAIE CONFIGURATION
+    #
+    # flowControl feature gate must be enabled — without it,
+    # llm_d_router_epp_flow_control_queue_size is never emitted and the
+    # HPA TARGETS column stays <unknown>.
+    # =========================================================================
+    inferenceExtension:
+      pluginsConfigFile: "direct-hpa-plugins.yaml"
+      pluginsCustomConfig:
+        direct-hpa-plugins.yaml: |
+          apiVersion: inference.networking.x-k8s.io/v1alpha1
+          kind: EndpointPickerConfig
+          featureGates:
+            - flowControl
+          plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: prefix-cache-scorer
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: queue-scorer
+                  weight: 2
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2
+                - pluginRef: prefix-cache-scorer
+                  weight: 3
+
+    # =========================================================================
+    # PREFILL / DECODE CONFIGURATION
+    # =========================================================================
+    prefill:
+      enabled: false
+      replicas: 0
+
+    decode:
+      replicas: 2
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      resources:
+        limits:
+          memory: 64Gi
+          cpu: "16"
+        requests:
+          memory: 64Gi
+          cpu: "16"
+
+      extraEnvVars: []
+
+      extraContainerConfig:
+        ports:
+          - containerPort: 5557
+            protocol: TCP
+          - containerPort: 8200
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+          runAsGroup: 0
+          runAsUser: 0
+        imagePullPolicy: Always
+
+      additionalVolumeMounts: []
+      additionalVolumes: []
+
+      # PodMonitor is required: prometheus-adapter must scrape EPP metrics
+      # for the HPA external metrics to resolve. Without this, HPA TARGETS
+      # stays <unknown>.
+      monitoring:
+        podmonitor:
+          enabled: true
+          portName: metrics
+          path: /metrics
+          interval: 30s
+          labels:
+            release: llmd
+
+      probes:
+        startup:
+          path: /v1/models
+          failureThreshold: 60
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+        liveness:
+          path: /health
+          failureThreshold: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readiness:
+          path: /v1/models
+          failureThreshold: 3
+          periodSeconds: 5
+          timeoutSeconds: 2
+
+    # =========================================================================
+    # VLLM COMMON CONFIGURATION
+    # =========================================================================
+    vllmCommon:
+      kvTransfer:
+        enabled: true
+        connector: NixlConnector
+        role: kv_both
+
+      flags:
+        enforceEager: true
+        disableLogRequests: true
+        disableUvicornAccessLog: true
+        allowLongMaxModelLen: "1"
+        serverDevMode: "1"
+
+      volumes:
+        - name: shared-config
+          type: emptyDir
+          emptyDir: {}
+        - name: dshm
+          type: emptyDir
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: shared-config
+          mountPath: /shared-config
+
+    # =========================================================================
+    # STORAGE
+    # =========================================================================
+    storage:
+      modelPvc:
+        size: 1Ti
+
+    # =========================================================================
+    # WORKLOAD / HARNESS
+    # =========================================================================
+    workDir: "~/data/inference-scheduling-direct-hpa"
+
+    harness:
+      name: inference-perf
+      experimentProfile: shared_prefix_synthetic.yaml

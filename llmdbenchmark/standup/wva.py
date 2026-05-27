@@ -25,9 +25,7 @@ from llmdbenchmark.executor.command import CommandExecutor
 from llmdbenchmark.executor.context import ExecutionContext
 
 
-def extract_prometheus_ca_cert(
-    cmd: CommandExecutor, logger
-) -> str | None:
+def extract_prometheus_ca_cert(cmd: CommandExecutor, logger) -> str | None:
     """Extract the Prometheus CA cert from the OpenShift monitoring stack.
 
     Tries (in order):
@@ -136,9 +134,7 @@ def install_wva_for_namespace(  # pylint: disable=too-many-arguments,too-many-lo
 
     tmp_dir = Path(tempfile.mkdtemp())
     wva_values_path = tmp_dir / "wva_config.yaml"
-    wva_values_path.write_text(
-        yaml.dump(wva_config, sort_keys=False), encoding="utf-8"
-    )
+    wva_values_path.write_text(yaml.dump(wva_config, sort_keys=False), encoding="utf-8")
 
     wva_chart = plan_config.get("helmRepositories", {}).get("wva", {})
     chart_url = wva_chart.get("url", "")
@@ -265,10 +261,16 @@ def install_prometheus_adapter(  # pylint: disable=too-many-arguments
         )
     else:
         repo_url = _require_config(
-            plan_config, "helmRepositories", "prometheusAdapter", "url",
+            plan_config,
+            "helmRepositories",
+            "prometheusAdapter",
+            "url",
         )
         chart_name = _require_config(
-            plan_config, "helmRepositories", "prometheusAdapter", "name",
+            plan_config,
+            "helmRepositories",
+            "prometheusAdapter",
+            "name",
         )
         repo_alias = "prometheus-community"
 
@@ -346,6 +348,23 @@ def apply_wva_namespace_label(
     ns_yaml = _find_yaml(stack_path, "23_wva-namespace")
     if ns_yaml and _has_yaml_content(ns_yaml):
         cmd.kube("apply", "-f", str(ns_yaml), check=False)
+
+
+def stacks_enabling_direct_hpa(rendered_stacks: list[Path]) -> list[tuple[Path, dict]]:
+    """Return (stack_path, plan_config) pairs for every rendered stack with directHpa.enabled."""
+    pairs: list[tuple[Path, dict]] = []
+    for stack_path in rendered_stacks:
+        cfg_file = stack_path / "config.yaml"
+        if not cfg_file.exists():
+            continue
+        try:
+            with open(cfg_file, encoding="utf-8") as fh:
+                cfg = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if cfg.get("directHpa", {}).get("enabled", False):
+            pairs.append((stack_path, cfg))
+    return pairs
 
 
 def stacks_enabling_wva(rendered_stacks: list[Path]) -> list[tuple[Path, dict]]:

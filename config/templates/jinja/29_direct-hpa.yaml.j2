@@ -1,0 +1,52 @@
+{# ============================================================================
+   29_direct-hpa.yaml.j2
+
+   Per-stack HorizontalPodAutoscaler for Direct HPA mode. Scales the decode
+   Deployment directly from EPP Prometheus metrics exposed through
+   prometheus-adapter — no WVA controller in the loop.
+
+   Metrics:
+     epp_flow_control_queue_size  mapped from inference_extension_flow_control_queue_size
+       (gateway-api-inference-extension v1.5.x emits the deprecated name;
+        future EPP versions will emit llm_d_router_epp_flow_control_queue_size)
+
+   Label scoping:
+     inference_pool selector narrows epp_flow_control_queue_size to THIS
+     deployment's InferencePool. The InferencePool resource is named
+     {{ model_id_label }}-gaie, which EPP sets as the inference_pool label value.
+
+   epp_running_requests (inference_objective_running_requests) is NOT used
+   in the HPA spec because that metric carries only a model_name label whose
+   value contains '/', making it invalid as a Kubernetes label selector value.
+
+   Only rendered when directHpa.enabled is true.
+   ============================================================================ #}
+{% if directHpa is defined and directHpa.enabled | default(false) %}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ model_id_label }}-decode-direct
+  namespace: {{ namespace.name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ model_id_label }}-decode
+  minReplicas: {{ directHpa.minReplicas | default(1) }}
+  maxReplicas: {{ directHpa.maxReplicas | default(10) }}
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: epp_flow_control_queue_size
+          selector:
+            matchLabels:
+              inference_pool: {{ model_id_label }}-gaie
+        target:
+          type: Value
+          value: "{{ directHpa.queueSizeTarget | default(250) }}"
+{% if directHpa.behavior is defined and directHpa.behavior %}
+  behavior:
+{{ directHpa.behavior | toyaml | indent(4, first=True) }}
+{% endif %}
+{% endif %}

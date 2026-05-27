@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 # ---------------------------------------------------------------------------
 # Shared ConfigDict presets
@@ -158,6 +158,33 @@ class AutoscalingConfig(BaseModel):
     enabled: bool
     minReplicas: int | None = None
     maxReplicas: int | None = None
+
+
+class DirectHpaPrometheusConfig(BaseModel):
+    """Prometheus endpoint config for Direct HPA prometheus-adapter."""
+
+    model_config = STRICT_CONFIG
+
+    baseUrl: str
+    port: int
+
+
+class DirectHpaConfig(BaseModel):
+    """Direct HPA configuration — baseline autoscaling without a WVA controller.
+
+    Scales the decode Deployment directly from EPP Prometheus metrics via
+    prometheus-adapter. Mutually exclusive with ``wva.enabled: true``.
+    """
+
+    model_config = STRICT_CONFIG
+
+    enabled: bool
+    minReplicas: int | None = None
+    maxReplicas: int | None = None
+    queueSizeTarget: int | None = None
+    runningRequestsTarget: int | None = None
+    behavior: dict[str, Any] | None = None
+    prometheus: DirectHpaPrometheusConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +449,24 @@ class BenchmarkConfig(BaseModel):
     vllmCommon: VllmCommonConfig
     harness: HarnessConfig
     parallelism: ParallelismConfig | None = None
+    directHpa: DirectHpaConfig | None = None
 
     # Scenario-level workspace directory (equivalent to LLMDBENCH_CONTROL_WORK_DIR).
     # Used as workspace fallback when --workspace is not specified on the CLI.
     workDir: str | None = None
+
+    @model_validator(mode="after")
+    def _check_autoscaler_mutual_exclusion(self) -> "BenchmarkConfig":
+        wva_enabled = (self.model_extra or {}).get("wva", {})
+        if isinstance(wva_enabled, dict):
+            wva_enabled = wva_enabled.get("enabled", False)
+        direct_hpa_enabled = self.directHpa and self.directHpa.enabled
+        if wva_enabled and direct_hpa_enabled:
+            raise ValueError(
+                "wva.enabled and directHpa.enabled cannot both be true. "
+                "Choose one autoscaling mode per stack."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

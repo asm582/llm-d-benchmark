@@ -163,11 +163,15 @@ class WorkloadMonitoringStep(Step):
         """
         val = str(val).strip()
         suffixes = {
-            "k": 1_000, "K": 1_000,
+            "k": 1_000,
+            "K": 1_000,
             "Ki": 1_024,
-            "M": 1_000_000, "Mi": 1_048_576,
-            "G": 1_000_000_000, "Gi": 1_073_741_824,
-            "T": 1_000_000_000_000, "Ti": 1_099_511_627_776,
+            "M": 1_000_000,
+            "Mi": 1_048_576,
+            "G": 1_000_000_000,
+            "Gi": 1_073_741_824,
+            "T": 1_000_000_000_000,
+            "Ti": 1_099_511_627_776,
         }
         for suffix, multiplier in sorted(suffixes.items(), key=lambda x: -len(x[0])):
             if val.endswith(suffix):
@@ -346,14 +350,14 @@ class WorkloadMonitoringStep(Step):
         if node_labels is None:
             # kubectl call failed -- warn but don't block
             context.logger.log_warning(
-                "Could not retrieve node labels -- " "skipping node selector validation"
+                "Could not retrieve node labels -- skipping node selector validation"
             )
             return
 
         for source, key, value in selectors:
             if self._label_exists_on_nodes(node_labels, key, value):
                 context.logger.log_info(
-                    f"Node selector {key}={value} ({source}) -- " "matched on cluster"
+                    f"Node selector {key}={value} ({source}) -- matched on cluster"
                 )
             else:
                 errors.append(
@@ -492,6 +496,7 @@ class WorkloadMonitoringStep(Step):
         # UWM is enabled. Any rendered stack with wva.enabled: true
         # triggers the install; one WVA controller per unique wva.namespace.
         self._install_wva_if_enabled(cmd, context, errors)
+        self._install_prometheus_adapter_for_direct_hpa(cmd, context, errors)
 
     def _install_wva_if_enabled(
         self,
@@ -528,9 +533,8 @@ class WorkloadMonitoringStep(Step):
         # prometheus-adapter + ClusterRole: cluster-wide, install once
         # from the first stack's rendered templates.
         first_stack, first_cfg = pairs[0]
-        monitoring_ns = (
-            first_cfg.get("openshiftMonitoring", {})
-            .get("userWorkloadMonitoringNamespace", "openshift-user-workload-monitoring")
+        monitoring_ns = first_cfg.get("openshiftMonitoring", {}).get(
+            "userWorkloadMonitoringNamespace", "openshift-user-workload-monitoring"
         )
 
         prom_ca_cert = wva_mod.extract_prometheus_ca_cert(cmd, context.logger)
@@ -559,7 +563,9 @@ class WorkloadMonitoringStep(Step):
             )
 
         # One WVA controller per unique wva.namespace.
-        for wva_ns, (stack_path, plan_config) in wva_mod.unique_wva_namespaces(pairs).items():
+        for wva_ns, (stack_path, plan_config) in wva_mod.unique_wva_namespaces(
+            pairs
+        ).items():
             wva_mod.apply_wva_namespace_label(cmd, stack_path, wva_ns)
             wva_mod.install_wva_for_namespace(
                 cmd=cmd,
@@ -570,3 +576,55 @@ class WorkloadMonitoringStep(Step):
                 prom_ca_cert=prom_ca_cert,
                 errors=errors,
             )
+
+    def _install_prometheus_adapter_for_direct_hpa(
+        self,
+        cmd: CommandExecutor,
+        context: ExecutionContext,
+        errors: list,
+    ) -> None:
+        """Install prometheus-adapter for Direct HPA mode (no WVA controller).
+
+        Runs when at least one rendered stack has directHpa.enabled: true
+        and no WVA stack is also enabled (WVA already handles the adapter
+        install via _install_wva_if_enabled). Works on any platform.
+        """
+        dhpa_pairs = wva_mod.stacks_enabling_direct_hpa(context.rendered_stacks or [])
+        if not dhpa_pairs:
+            return
+
+        # If WVA is also enabled on any stack, its install path already
+        # handles prometheus-adapter — skip to avoid a double-install.
+        wva_pairs = wva_mod.stacks_enabling_wva(context.rendered_stacks or [])
+        if wva_pairs:
+            context.logger.log_info(
+                "ℹ️  Direct HPA: prometheus-adapter already handled by WVA install path"
+            )
+            return
+
+        first_stack, first_cfg = dhpa_pairs[0]
+        monitoring_ns = first_cfg.get("openshiftMonitoring", {}).get(
+            "userWorkloadMonitoringNamespace", "openshift-user-workload-monitoring"
+        )
+
+        context.logger.log_info(
+            "🔌 Direct HPA: installing prometheus-adapter for EPP metric rules"
+        )
+
+        prom_ca_cert = wva_mod.extract_prometheus_ca_cert(cmd, context.logger)
+        if not prom_ca_cert:
+            context.logger.log_warning(
+                "Could not extract a Prometheus CA cert for Direct HPA "
+                "prometheus-adapter install. The HPA TARGETS column may "
+                "stay <unknown> if the adapter cannot reach Prometheus over TLS."
+            )
+
+        wva_mod.install_prometheus_adapter(
+            cmd=cmd,
+            context=context,
+            plan_config=first_cfg,
+            stack_path=first_stack,
+            monitoring_ns=monitoring_ns,
+            prom_ca_cert=prom_ca_cert or "",
+            errors=errors,
+        )

@@ -49,6 +49,7 @@ class RenderPlans:
         cli_methods: str | None = None,
         cli_monitoring: bool | None = None,
         cli_wva: bool = False,
+        cli_direct_hpa: bool = False,
         setup_overrides: dict | None = None,
         cli_stack_filter: list[str] | None = None,
     ):
@@ -63,6 +64,7 @@ class RenderPlans:
         self.cli_methods = cli_methods
         self.cli_monitoring = cli_monitoring
         self.cli_wva = cli_wva
+        self.cli_direct_hpa = cli_direct_hpa
         self.setup_overrides = setup_overrides
         # When --stack selects exactly one stack, -m/--models scopes to
         # that stack only (sibling stacks keep their scenario-defined
@@ -353,7 +355,10 @@ class RenderPlans:
         return f"{first8}-{hash8}-{last8}".lower()
 
     def _resolve_model(
-        self, values: dict, total_stacks: int = 1, stack_name: str = "",
+        self,
+        values: dict,
+        total_stacks: int = 1,
+        stack_name: str = "",
     ) -> dict:
         """Resolve model configuration from CLI ``--models`` override.
 
@@ -439,11 +444,7 @@ class RenderPlans:
             return
 
         for role in ("decode", "prefill"):
-            cmd = (
-                values.get(role, {})
-                .get("vllm", {})
-                .get("customCommand")
-            )
+            cmd = values.get(role, {}).get("vllm", {}).get("customCommand")
             if cmd:
                 self.logger.log_warning(
                     f"CLI --models override ({self.cli_model}) will not "
@@ -503,6 +504,30 @@ class RenderPlans:
         self.logger.log_info("Workload Variant Autoscaler enabled from CLI")
         return result
 
+    def _resolve_direct_hpa(self, values: dict) -> dict:
+        """Enable Direct HPA when ``-d/--direct-hpa`` is set.
+
+        Also validates mutual exclusion: raises a warning when both
+        ``--wva`` and ``--direct-hpa`` are given at the CLI level.
+        Schema-level mutual exclusion is enforced by the Pydantic validator.
+        """
+        if not self.cli_direct_hpa:
+            return values
+
+        if self.cli_wva:
+            self.logger.log_warning(
+                "--direct-hpa and --wva are mutually exclusive. "
+                "Ignoring --direct-hpa; WVA will be used."
+            )
+            return values
+
+        result = deepcopy(values)
+        direct_hpa_config = result.setdefault("directHpa", {})
+        direct_hpa_config["enabled"] = True
+
+        self.logger.log_info("Direct HPA baseline mode enabled from CLI")
+        return result
+
     def _resolve_deploy_method(self, values: dict) -> dict:
         """Override deploy method based on CLI ``--methods`` flag.
 
@@ -526,8 +551,7 @@ class RenderPlans:
             methods = ["modelservice"]
         if "standalone" in methods and "fma" in methods:
             self.logger.log_warning(
-                "Cannot enable both standalone and fma -- "
-                "choose one. Using standalone."
+                "Cannot enable both standalone and fma -- choose one. Using standalone."
             )
             methods = ["standalone"]
         if "modelservice" in methods and "fma" in methods:
@@ -647,13 +671,13 @@ class RenderPlans:
         # SA access to the user-workload-monitoring Prometheus. Two gaie
         # Helm releases sharing this Secret name in one namespace fail
         # with "owned by another helm release".
-        (("inferenceExtension", "monitoring", "secretName"),
-         "inference-gateway-sa-metrics-reader-secret"),
+        (
+            ("inferenceExtension", "monitoring", "secretName"),
+            "inference-gateway-sa-metrics-reader-secret",
+        ),
     )
 
-    def _resolve_per_stack_identity(
-        self, values: dict, total_stacks: int = 1
-    ) -> dict:
+    def _resolve_per_stack_identity(self, values: dict, total_stacks: int = 1) -> dict:
         """Auto-suffix stack-scoped resource names with ``model_id_label``.
 
         Multi-stack scenarios need per-model PVCs, Download Jobs, and EPP
@@ -713,8 +737,7 @@ class RenderPlans:
         scenario authors don't need to compute the hashed label by hand.
         """
         dest_rule = (
-            values
-            .get("inferenceExtension", {})
+            values.get("inferenceExtension", {})
             .get("inferencePoolProviderConfig", {})
             .get("destinationRule")
         )
@@ -723,8 +746,7 @@ class RenderPlans:
             if model_id_label:
                 dest_rule["host"] = f"{model_id_label}-gaie-epp"
                 self.logger.log_info(
-                    f"Auto-resolved destinationRule.host to "
-                    f"'{dest_rule['host']}'"
+                    f"Auto-resolved destinationRule.host to '{dest_rule['host']}'"
                 )
         return values
 
@@ -760,6 +782,7 @@ class RenderPlans:
 
     def _substitute_string(self, text: str, root: dict) -> str:
         """Replace all ``${dotted.path}`` patterns in a single string."""
+
         def _replace(match: re.Match) -> str:
             path = match.group(1)
             value = self._resolve_dotted_path(path, root)
@@ -918,7 +941,9 @@ class RenderPlans:
         return errors
 
     def _build_sibling_stacks(
-        self, stacks: list[dict], shared: dict | None = None,
+        self,
+        stacks: list[dict],
+        shared: dict | None = None,
     ) -> list[dict]:
         """Build a minimal per-stack summary list the HTTPRoute template can
         iterate over to emit one backendRef per sibling stack.
@@ -950,15 +975,15 @@ class RenderPlans:
             # otherwise None (undetermined -> treat as non-standalone).
             stack_standalone = (stack.get("standalone") or {}).get("enabled")
             is_standalone = bool(
-                stack_standalone
-                if stack_standalone is not None
-                else shared_standalone
+                stack_standalone if stack_standalone is not None else shared_standalone
             )
-            siblings.append({
-                "name": stack.get("name", ""),
-                "modelName": model_name,
-                "standalone": is_standalone,
-            })
+            siblings.append(
+                {
+                    "name": stack.get("name", ""),
+                    "modelName": model_name,
+                    "standalone": is_standalone,
+                }
+            )
         return siblings
 
     def _validate_shared_block(self, defaults: dict, shared: dict) -> None:
@@ -1052,9 +1077,7 @@ class RenderPlans:
 
         # Raises RuntimeError if "auto" values are present but cluster is unreachable
         if self.cluster_resource_resolver:
-            merged_values = self.cluster_resource_resolver.resolve_all(
-                merged_values
-            )
+            merged_values = self.cluster_resource_resolver.resolve_all(merged_values)
 
         merged_values = self._resolve_namespace(merged_values)
         merged_values = self._resolve_model(
@@ -1066,6 +1089,7 @@ class RenderPlans:
         merged_values = self._resolve_deploy_method(merged_values)
         merged_values = self._resolve_monitoring(merged_values)
         merged_values = self._resolve_wva(merged_values)
+        merged_values = self._resolve_direct_hpa(merged_values)
         merged_values = self._resolve_hf_token(merged_values)
         merged_values = self._resolve_model_id_label(merged_values)
         merged_values = self._resolve_per_stack_identity(
@@ -1183,8 +1207,7 @@ class RenderPlans:
         # catch now - fails fast with a list of known names.
         if self.cli_stack_filter:
             known_stack_names = {
-                s.get("name") for s in stacks
-                if isinstance(s, dict) and s.get("name")
+                s.get("name") for s in stacks if isinstance(s, dict) and s.get("name")
             }
             unknown = [n for n in self.cli_stack_filter if n not in known_stack_names]
             if unknown:

@@ -1364,6 +1364,45 @@ wva:
     scheme: http
 
 # ============================================================================
+# DIRECT HPA
+#
+# Baseline autoscaling mode: a plain HPA driven by EPP Prometheus metrics,
+# with no WVA controller in the loop. Used to benchmark WVA against
+# vanilla metric-driven scaling. Mutually exclusive with wva.enabled.
+#
+# Metrics (via prometheus-adapter):
+#   epp_flow_control_queue_size  ← llm_d_router_epp_flow_control_queue_size
+#   epp_running_requests         ← llm_d_router_epp_running_requests
+# ============================================================================
+directHpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  # Value at which the HPA triggers scale-up for the queue-size metric.
+  queueSizeTarget: 250
+  # AverageValue at which the HPA triggers scale-up for running requests.
+  runningRequestsTarget: 250
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 240
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+  # Prometheus endpoint for prometheus-adapter.
+  # On OpenShift: thanos-querier (same as wva.prometheus).
+  # On GKE: point at your kube-prometheus-stack Service URL.
+  prometheus:
+    baseUrl: https://thanos-querier.openshift-monitoring.svc.cluster.local
+    port: 9091
+
+# ============================================================================
 # GATEWAY PROVIDERS
 # ============================================================================
 gatewayProviders:
